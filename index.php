@@ -151,23 +151,34 @@ $paths = new Config\Paths();
  * if the bootstrap file isn't readable.
  */
 (static function (string $fcpath): void {
-    $bootstrap = realpath($fcpath . 'vendor/codeigniter4/framework/system/bootstrap.php');
-    if ($bootstrap && is_readable($bootstrap)) {
-        return; // Already OK — skip the expensive chmod pass
+    // Check readability WITHOUT realpath() — realpath() returns false on unreadable
+    // paths, making it useless as a guard here. Use a plain string concat + fopen.
+    $bootstrapPath = $fcpath . 'vendor/codeigniter4/framework/system/bootstrap.php';
+    $fh = @fopen($bootstrapPath, 'r');
+    if ($fh !== false) {
+        fclose($fh);
+        return; // Already readable — skip the chmod pass
     }
-    // Fix permissions: 755 for directories, 644 for files
+    // Fix permissions: chmod the top-level dir FIRST (so the iterator can open it),
+    // then recurse. No @ suppressor so errors surface during install (display_errors=1).
     foreach (['vendor', 'app'] as $top) {
         $dir = $fcpath . $top;
         if (! is_dir($dir)) {
             continue;
         }
-        $iter = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
-            RecursiveIteratorIterator::SELF_FIRST
-        );
-        @chmod($dir, 0755);
-        foreach ($iter as $item) {
-            @chmod($item->getPathname(), $item->isDir() ? 0755 : 0644);
+        // Must chmod the top dir before RecursiveDirectoryIterator tries to open it
+        chmod($dir, 0755);
+        try {
+            $iter = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($iter as $item) {
+                chmod($item->getPathname(), $item->isDir() ? 0755 : 0644);
+            }
+        } catch (Throwable $e) {
+            // Log and continue — don't let a chmod failure kill the boot
+            error_log('Qanony fixperms: ' . $e->getMessage());
         }
     }
 })(FCPATH);
