@@ -84,7 +84,9 @@ phpunit
 #-------------------------
 # Composer
 #-------------------------
-vendor/
+# vendor/ is intentionally committed so shared-hosting servers
+# without SSH/composer access get a ready-to-run deployment.
+# vendor/
 
 #-------------------------
 # IDE / Development Files
