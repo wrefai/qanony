@@ -1,0 +1,7 @@
+﻿# Block direct PHP execution in public/
+<Files ~ "\.php$">
+    Deny from all
+</Files>
+
+# Allow static assets (css, js, fonts, icons, images) to be served directly
+# Everything else is blocked. There are no PHP files here that should run.
