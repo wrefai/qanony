@@ -42,10 +42,16 @@ abstract class BaseController extends Controller
     {
         parent::initController($request, $response, $logger);
 
-        // Apply locale from session (language toggle persistence)
+        // Apply locale: session value takes priority (language toggle
+        // persistence). If no session locale is set, fall back to the
+        // configured defaultLocale rather than CI4's browser-negotiated
+        // locale, so the UI defaults to Arabic for fresh sessions.
+        $appConfig     = config('App');
         $sessionLocale = session()->get('locale');
-        if ($sessionLocale && in_array($sessionLocale, config('App')->supportedLocales, true)) {
+        if ($sessionLocale && in_array($sessionLocale, $appConfig->supportedLocales, true)) {
             $request->setLocale($sessionLocale);
+        } else {
+            $request->setLocale($appConfig->defaultLocale);
         }
 
         // Populate current user info from session

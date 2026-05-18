@@ -645,6 +645,10 @@ function qy_autologin(int $userId, string $siteUrl, string $sessionId, array $in
         'permissions'           => $permissions,
         'logged_in'             => true,
         'force_password_change' => false,
+        // Force Arabic UI on first login. Without this, CI4's negotiateLocale
+        // will pick `en` from the browser's Accept-Language header and the
+        // dashboard renders in English even though Arabic is the default.
+        'locale'                => 'ar',
     ];
 
     // CI4 DatabaseHandler stores the result of PHP's session_encode() in the
