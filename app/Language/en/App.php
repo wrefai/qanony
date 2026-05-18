@@ -70,6 +70,7 @@ return [
     'deleted_success' => 'Deleted successfully',
     'saved_success'  => 'Saved successfully',
     'error_occurred' => 'An error occurred. Please try again.',
+    'session_expired' => 'Your session expired. Please try again.',
     'not_found'      => 'Item not found',
     'forbidden'      => 'You do not have permission for this action',
     'active'         => 'Active',

@@ -22,9 +22,12 @@ class LanguageController extends BaseController
         // redirect. Without this, CI4's DatabaseHandler writes the session row
         // during request shutdown — and the browser's redirected request can
         // hit the server (and read the session) BEFORE that write commits, so
-        // the new locale appears to "not stick". Closing the session here
-        // guarantees the redirected request sees the updated value.
-        session()->close();
+        // the new locale appears to "not stick". CI4's Session class has no
+        // close() method, so call the native PHP function which is always
+        // available and flushes whatever session_start() opened.
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
 
         return redirect()->back();
     }

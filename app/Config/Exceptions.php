@@ -5,6 +5,7 @@ namespace Config;
 use CodeIgniter\Config\BaseConfig;
 use CodeIgniter\Debug\ExceptionHandler;
 use CodeIgniter\Debug\ExceptionHandlerInterface;
+use CodeIgniter\Security\Exceptions\SecurityException;
 use Psr\Log\LogLevel;
 use Throwable;
 
@@ -101,6 +102,13 @@ class Exceptions extends BaseConfig
      */
     public function handler(int $statusCode, Throwable $exception): ExceptionHandlerInterface
     {
+        // Use our CSRF-aware handler for SecurityException so stale/expired
+        // CSRF tokens redirect to the login page (or return JSON for AJAX)
+        // instead of triggering a generic "Whoops!" production page.
+        if ($exception instanceof SecurityException) {
+            return new \App\Libraries\CsrfAwareExceptionHandler($this);
+        }
+
         return new ExceptionHandler($this);
     }
 }
