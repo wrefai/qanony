@@ -168,8 +168,8 @@ if (is_dir($logDir)) {
         echo "    file: " . basename($latest) . " (" . filesize($latest) . " bytes)\n";
         $lines = @file($latest);
         if ($lines) {
-            $tail = array_slice($lines, -40);
-            echo "    --- last 40 lines ---\n";
+            $tail = array_slice($lines, -120);
+            echo "    --- last 120 lines ---\n";
             foreach ($tail as $line) echo "    " . rtrim($line) . "\n";
             echo "    --- end ---\n";
         }
@@ -181,40 +181,109 @@ if (is_dir($logDir)) {
 }
 echo "\n";
 
-// ---------- 8. Boot CI4 + try to render the login route ----------
-echo "[8] Attempt /auth/login boot trace\n";
-try {
-    // Reproduce what index.php does, but capture the exception.
-    define('FCPATH', __DIR__ . '/public/');
-    if (!defined('SYSTEMPATH')) {
-        // Read CI4 paths the same way public/index.php does.
-        $pathsPath = __DIR__ . '/app/Config/Paths.php';
-        if (!file_exists($pathsPath)) throw new RuntimeException("app/Config/Paths.php missing");
-        require_once $pathsPath;
-        $paths = new Config\Paths();
-        require_once $paths->systemDirectory . '/bootstrap.php';
-    }
-    // If we got here, CI4 framework loaded. Now try to instantiate AuthController.
-    if (!class_exists('App\Controllers\AuthController')) {
-        require_once __DIR__ . '/app/Controllers/AuthController.php';
-    }
-    echo "    AuthController class loaded: " . (class_exists('App\Controllers\AuthController') ? 'YES' : 'NO') . "\n";
+// ---------- 8. Live HTTP test of /auth/login ----------
+echo "[8] Live HTTP GET /auth/login (via cURL to self)\n";
+$env = file_exists($envPath) ? parse_ini_file($envPath, false, INI_SCANNER_RAW) : [];
+$baseUrl = trim(($env['app.baseURL'] ?? ''), "'\" ");
+if (!$baseUrl) {
+    echo "    SKIP — app.baseURL not set in .env\n";
+} else {
+    $target = rtrim($baseUrl, '/') . '/auth/login';
+    echo "    URL: $target\n";
+    $ch = curl_init($target);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HEADER         => true,
+        CURLOPT_USERAGENT      => 'qanony-diag/1.0',
+    ]);
+    $start = microtime(true);
+    $resp  = curl_exec($ch);
+    $err   = curl_error($ch);
+    $info  = curl_getinfo($ch);
+    $dur   = round((microtime(true) - $start) * 1000);
+    curl_close($ch);
 
-    // Try to load BaseController too
-    if (!class_exists('App\Controllers\BaseController')) {
-        require_once __DIR__ . '/app/Controllers/BaseController.php';
+    echo "    duration: {$dur}ms\n";
+    echo "    http_code: " . ($info['http_code'] ?? '?') . "\n";
+    echo "    content_type: " . ($info['content_type'] ?? '?') . "\n";
+    if ($err) echo "    curl error: $err\n";
+    if ($resp !== false) {
+        $headerSize = $info['header_size'] ?? 0;
+        $headers = substr($resp, 0, $headerSize);
+        $body    = substr($resp, $headerSize);
+        echo "    --- response headers ---\n";
+        foreach (explode("\n", $headers) as $h) {
+            $h = rtrim($h);
+            if ($h !== '') echo "    $h\n";
+        }
+        echo "    --- response body (first 4000 chars) ---\n";
+        echo substr($body, 0, 4000) . "\n";
+        if (strlen($body) > 4000) echo "    ... [" . (strlen($body) - 4000) . " more chars truncated]\n";
+        echo "    --- end ---\n";
     }
-    echo "    BaseController class loaded: " . (class_exists('App\Controllers\BaseController') ? 'YES' : 'NO') . "\n";
+}
+echo "\n";
+
+// ---------- 9. Boot CI4 in-process and try to render login ----------
+echo "[9] In-process boot + render attempt\n";
+try {
+    // Force display of exceptions even in production for THIS process only.
+    ini_set('display_errors', '1');
+    if (!defined('FCPATH')) define('FCPATH', __DIR__ . '/public/');
+
+    $pathsPath = __DIR__ . '/app/Config/Paths.php';
+    if (!file_exists($pathsPath)) throw new RuntimeException("app/Config/Paths.php missing");
+    require_once $pathsPath;
+    $paths = new Config\Paths();
+    require_once $paths->systemDirectory . '/Boot.php';
+
+    // Manually init CI without running it (avoids sending headers).
+    \CodeIgniter\Boot::preloadDotEnv($paths);
+    \CodeIgniter\Boot::loadEnvironmentBootstrap($paths, false);
+
+    echo "    bootstrap: OK\n";
+    echo "    CI_ENVIRONMENT: " . (defined('ENVIRONMENT') ? ENVIRONMENT : '?') . "\n";
+
+    // Try to instantiate AuthController and call login()
+    $request = \Config\Services::request();
+    $response = \Config\Services::response();
+    $logger = \Config\Services::logger();
+
+    $auth = new \App\Controllers\AuthController();
+    $auth->initController($request, $response, $logger);
+    echo "    AuthController instantiated: YES\n";
+
+    $result = $auth->login();
+    echo "    login() returned: " . (is_object($result) ? get_class($result) : gettype($result)) . "\n";
+    if (is_object($result) && method_exists($result, 'getBody')) {
+        $body = (string) $result->getBody();
+        echo "    body length: " . strlen($body) . " chars\n";
+        echo "    body preview (first 600):\n    " . substr(str_replace("\n", "\n    ", $body), 0, 600) . "\n";
+    } elseif (is_string($result)) {
+        echo "    body length: " . strlen($result) . " chars\n";
+        echo "    body preview (first 600):\n    " . substr(str_replace("\n", "\n    ", $result), 0, 600) . "\n";
+    }
 } catch (Throwable $e) {
     echo "    EXCEPTION: " . get_class($e) . "\n";
     echo "    message  : " . $e->getMessage() . "\n";
     echo "    file     : " . $e->getFile() . ":" . $e->getLine() . "\n";
-    echo "    trace    :\n" . $e->getTraceAsString() . "\n";
+    echo "    --- trace ---\n";
+    echo "    " . str_replace("\n", "\n    ", $e->getTraceAsString()) . "\n";
+    if ($e->getPrevious()) {
+        $p = $e->getPrevious();
+        echo "    --- previous: " . get_class($p) . " ---\n";
+        echo "    message: " . $p->getMessage() . "\n";
+        echo "    file   : " . $p->getFile() . ":" . $p->getLine() . "\n";
+    }
 }
 echo "\n";
 
-// ---------- 9. Key files presence + mtime ----------
-echo "[9] Recently-changed key files\n";
+// ---------- 10. Key files presence + mtime ----------
+echo "[10] Recently-changed key files\n";
 $files = [
     'app/Controllers/BaseController.php',
     'app/Controllers/AuthController.php',
