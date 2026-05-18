@@ -10,7 +10,6 @@ class LanguageController extends BaseController
 
         if (in_array($locale, $supported, true)) {
             session()->set('locale', $locale);
-            service('request')->setLocale($locale);
         }
 
         // Also handle optional ?theme= param (from old app.js fire-and-forget calls)
@@ -18,6 +17,14 @@ class LanguageController extends BaseController
         if ($theme !== null && in_array($theme, ['light', 'dark'], true)) {
             session()->set('theme', $theme);
         }
+
+        // Force-commit the session write & release the lock before issuing the
+        // redirect. Without this, CI4's DatabaseHandler writes the session row
+        // during request shutdown — and the browser's redirected request can
+        // hit the server (and read the session) BEFORE that write commits, so
+        // the new locale appears to "not stick". Closing the session here
+        // guarantees the redirected request sees the updated value.
+        session()->close();
 
         return redirect()->back();
     }

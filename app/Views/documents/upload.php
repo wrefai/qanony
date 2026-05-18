@@ -322,7 +322,7 @@ document.addEventListener('DOMContentLoaded', function() {
             case 'duplicate':
                 return '<span class="badge bg-warning text-dark"><i class="bi bi-arrow-repeat"></i> ' + L.duplicate + '</span>';
             case 'error':
-                return '<span class="badge bg-danger" title="' + escHtml(message) + '"><i class="bi bi-x-circle"></i> ' + L.failed + '</span>';
+                return '<span class="badge bg-danger" title="' + escAttr(message) + '" style="cursor:help"><i class="bi bi-x-circle"></i> ' + L.failed + (message ? ' — ' + escHtml(message.length > 80 ? message.substring(0, 77) + '...' : message) : '') + '</span>';
             case 'cancelled':
                 return '<span class="badge bg-secondary"><i class="bi bi-dash-circle"></i> ' + L.cancelled + '</span>';
             default:
@@ -359,6 +359,16 @@ document.addEventListener('DOMContentLoaded', function() {
         const div = document.createElement('div');
         div.appendChild(document.createTextNode(str || ''));
         return div.innerHTML;
+    }
+
+    // ── Attribute-safe escape (escapes quotes too) ───────────────
+    function escAttr(str) {
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
     }
 
     // ── Get metadata from form ───────────────────────────────────
@@ -429,18 +439,23 @@ document.addEventListener('DOMContentLoaded', function() {
                         const recovered = await fetchFreshCsrf();
                         if (recovered) return attempt(); // retry once
                     }
+                    if ((data.status || 'error') === 'error') {
+                        console.error('Upload failed for', fileQueue[idx].file.name, data);
+                    }
                     updateFileStatus(idx, data.status || 'error', data.message || '');
                 } else {
+                    console.error('Upload returned no response for', fileQueue[idx].file.name);
                     updateFileStatus(idx, 'error', 'No response');
                 }
             } catch (err) {
+                console.error('Upload exception for', fileQueue[idx].file.name, err);
                 // err.data may contain the synthetic error object from Q.ajax
                 if (err.data && err.data._csrfError && !retried) {
                     retried = true;
                     const recovered = await fetchFreshCsrf();
                     if (recovered) return attempt(); // retry once
                 }
-                const msg = (err.data && err.data.message) ? err.data.message : 'Network error';
+                const msg = (err.data && err.data.message) ? err.data.message : ('Network error: ' + (err.message || 'unknown'));
                 updateFileStatus(idx, 'error', msg);
             }
         }

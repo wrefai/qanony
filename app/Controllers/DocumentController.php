@@ -392,10 +392,37 @@ class DocumentController extends BaseController
         // Move file to permanent storage — NO parsing here
         $uploadPath = WRITEPATH . 'uploads/documents/original/';
         if (!is_dir($uploadPath)) {
-            mkdir($uploadPath, 0755, true);
+            @mkdir($uploadPath, 0777, true);
         }
+        // Force-relax permissions: on shared cPanel hosts the cPanel user
+        // who ran the installer is often different from the runtime PHP
+        // user, so a 0775 dir created at install time can be unwritable
+        // when an upload arrives. 0777 on a non-web-accessible dir under
+        // writable/ is an acceptable trade-off to actually allow uploads.
+        @chmod($uploadPath, 0777);
+
+        if (!is_writable($uploadPath)) {
+            log_message('error', "Upload path not writable: {$uploadPath}");
+            return $this->jsonResponse([
+                'status'    => 'error',
+                'message'   => 'Upload directory is not writable: ' . $uploadPath,
+                'file_name' => $originalName,
+                'csrf_hash' => $csrfHash,
+            ]);
+        }
+
         $newName      = $file->getRandomName();
-        $file->move($uploadPath, $newName);
+        try {
+            $file->move($uploadPath, $newName);
+        } catch (\Throwable $e) {
+            log_message('error', 'File move failed: ' . $e->getMessage());
+            return $this->jsonResponse([
+                'status'    => 'error',
+                'message'   => 'Move failed: ' . $e->getMessage(),
+                'file_name' => $originalName,
+                'csrf_hash' => $csrfHash,
+            ]);
+        }
         $fullPath     = $uploadPath . $newName;
         $relativePath = 'uploads/documents/original/' . $newName;
 
@@ -430,7 +457,7 @@ class DocumentController extends BaseController
             log_message('error', 'Queue insert failed: ' . $e->getMessage());
             return $this->jsonResponse([
                 'status'    => 'error',
-                'message'   => lang('App.error_occurred'),
+                'message'   => lang('App.error_occurred') . ' — ' . $e->getMessage(),
                 'file_name' => $originalName,
                 'csrf_hash' => $csrfHash,
             ]);

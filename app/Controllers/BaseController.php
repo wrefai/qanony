@@ -42,29 +42,36 @@ abstract class BaseController extends Controller
     {
         parent::initController($request, $response, $logger);
 
-        // Apply locale: session value takes priority (language toggle
-        // persistence). If no session locale is set, fall back to the
-        // configured defaultLocale rather than CI4's browser-negotiated
-        // locale, so the UI defaults to Arabic for fresh sessions.
-        $appConfig     = config('App');
-        $sessionLocale = session()->get('locale');
-        if ($sessionLocale && in_array($sessionLocale, $appConfig->supportedLocales, true)) {
-            $request->setLocale($sessionLocale);
-        } else {
-            $request->setLocale($appConfig->defaultLocale);
-        }
+        // Apply locale + populate user info from the session. Both reads
+        // trigger session_start() under the hood — if the session backend
+        // (DB handler / writable dir) is broken, this can throw and turn
+        // every page into a generic "Whoops" production error. Wrap the
+        // whole block defensively: on failure, log a warning and fall
+        // back to the configured defaultLocale with no logged-in user.
+        $appConfig = config('App');
+        try {
+            $sessionLocale = session()->get('locale');
+            if ($sessionLocale && in_array($sessionLocale, $appConfig->supportedLocales, true)) {
+                $request->setLocale($sessionLocale);
+            } else {
+                $request->setLocale($appConfig->defaultLocale);
+            }
 
-        // Populate current user info from session
-        if (session()->get('logged_in')) {
-            $this->currentUser = [
-                'id'        => session()->get('user_id'),
-                'username'  => session()->get('username'),
-                'full_name' => session()->get('full_name'),
-                'email'     => session()->get('email'),
-                'role_id'   => session()->get('role_id'),
-                'role_name' => session()->get('role_name'),
-            ];
-            $this->currentPermissions = session()->get('permissions') ?? [];
+            // Populate current user info from session
+            if (session()->get('logged_in')) {
+                $this->currentUser = [
+                    'id'        => session()->get('user_id'),
+                    'username'  => session()->get('username'),
+                    'full_name' => session()->get('full_name'),
+                    'email'     => session()->get('email'),
+                    'role_id'   => session()->get('role_id'),
+                    'role_name' => session()->get('role_name'),
+                ];
+                $this->currentPermissions = session()->get('permissions') ?? [];
+            }
+        } catch (\Throwable $e) {
+            log_message('error', 'BaseController session/locale init failed: ' . $e->getMessage());
+            $request->setLocale($appConfig->defaultLocale);
         }
     }
 
