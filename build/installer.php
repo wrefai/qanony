@@ -124,6 +124,22 @@ function qy_action_test_db(): void
 
 function qy_action_install(): void
 {
+    // ── Pre-output: reserve a session ID and emit the session cookie
+    // BEFORE we start streaming progress, because once we've echoed
+    // the first line of NDJSON no more headers (cookies) can be sent.
+    // We will INSERT the matching ci_sessions row at the auto-login step.
+    $sessionId = bin2hex(random_bytes(20)); // 40 hex chars, fits VARCHAR(128)
+    $cookieParams = [
+        'expires'  => time() + 7200,
+        'path'     => '/',
+        'domain'   => '',
+        'secure'   => (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+                       || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https'),
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ];
+    setcookie('ci_session', $sessionId, $cookieParams);
+
     // Disable any output buffering so the progress log is streamed live.
     while (ob_get_level() > 0) { ob_end_clean(); }
     header('Content-Type: application/x-ndjson; charset=utf-8');
@@ -322,7 +338,7 @@ function qy_action_install(): void
         // ── Step 15: Auto-login ──────────────────────────────────
         $send('step', 'Signing you in…');
         try {
-            $loginUrl = qy_autologin($adminId, $input['site_url']);
+            $loginUrl = qy_autologin($adminId, $input['site_url'], $sessionId, $input);
         } catch (Throwable $e) {
             $fail('Auto-login failed: ' . $e->getMessage());
         }
@@ -576,58 +592,88 @@ function qy_boot_ci(): void
 
 /**
  * Issue an authenticated session for the freshly configured admin user
- * and return the URL the browser should be redirected to.
+ * by INSERTING a row directly into ci_sessions with PHP's native
+ * session_encode() format (which is what CI4's DatabaseHandler reads).
  *
- * Session keys match AuthController::attemptLogin() so AuthFilter accepts
- * the session and the user lands on /dashboard.
+ * The session cookie was already set by qy_action_install() BEFORE any
+ * output, so the browser will present this session ID on the redirect.
+ *
+ * @param int    $userId    DB id of the admin row to log in
+ * @param string $siteUrl   Site URL the wizard collected (used for redirect)
+ * @param string $sessionId 40-char hex session ID already sent as ci_session cookie
+ * @param array  $input     Form input (used to reach the DB if CI4 services aren't usable)
  */
-function qy_autologin(int $userId, string $siteUrl): string
+function qy_autologin(int $userId, string $siteUrl, string $sessionId, array $input): string
 {
-    $db   = \Config\Database::connect();
-    $user = $db->table('users')->where('id', $userId)->get()->getRowArray();
+    // Use a fresh PDO connection — avoids any CI4 session/service side-effects.
+    $dsn = "mysql:host={$input['db_hostname']};port={$input['db_port']};dbname={$input['db_database']};charset=utf8mb4";
+    $pdo = new PDO($dsn, $input['db_username'], $input['db_password'], [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ]);
+
+    // Look up the freshly configured admin row.
+    $st = $pdo->prepare('SELECT * FROM users WHERE id = ? LIMIT 1');
+    $st->execute([$userId]);
+    $user = $st->fetch(PDO::FETCH_ASSOC);
     if (! $user) {
         throw new RuntimeException('Cannot find the newly created admin user.');
     }
 
-    $role = $db->table('roles')->where('id', $user['role_id'])->get()->getRowArray();
+    // Look up the role name.
+    $st = $pdo->prepare('SELECT name FROM roles WHERE id = ? LIMIT 1');
+    $st->execute([$user['role_id']]);
+    $role = $st->fetch(PDO::FETCH_ASSOC);
 
-    // Pull permissions via the same join the UserModel uses.
-    $permRows = $db->table('role_permissions rp')
-        ->select('p.name')
-        ->join('permissions p', 'p.id = rp.permission_id')
-        ->where('rp.role_id', $user['role_id'])
-        ->get()
-        ->getResultArray();
-    $permissions = array_map(static fn($r) => $r['name'], $permRows);
+    // Pull permissions assigned to the admin role.
+    $st = $pdo->prepare(
+        'SELECT p.name FROM role_permissions rp '
+      . 'JOIN permissions p ON p.id = rp.permission_id '
+      . 'WHERE rp.role_id = ?'
+    );
+    $st->execute([$user['role_id']]);
+    $permissions = array_column($st->fetchAll(PDO::FETCH_ASSOC), 'name');
 
-    // Now switch the session config to DatabaseHandler (the table exists).
-    $_ENV['session.driver']    = 'CodeIgniter\\Session\\Handlers\\DatabaseHandler';
-    $_SERVER['session.driver'] = 'CodeIgniter\\Session\\Handlers\\DatabaseHandler';
-    putenv('session.driver=CodeIgniter\\Session\\Handlers\\DatabaseHandler');
-    $_ENV['session.savePath']    = 'ci_sessions';
-    $_SERVER['session.savePath'] = 'ci_sessions';
-    putenv('session.savePath=ci_sessions');
-
-    // Reset the cached session service so it picks up the new driver.
-    \Config\Services::reset(true);
-
-    $session = \Config\Services::session();
-    $session->start();
-    $session->regenerate();
-    $session->set([
+    // Build the session payload exactly as AuthController::attemptLogin() does.
+    $session = [
+        '__ci_last_regenerate'  => time(),
         'user_id'               => (int) $user['id'],
-        'username'              => $user['username'],
-        'full_name'             => $user['full_name'],
-        'email'                 => $user['email'],
+        'username'              => (string) $user['username'],
+        'full_name'             => (string) ($user['full_name'] ?? ''),
+        'email'                 => (string) ($user['email'] ?? ''),
         'role_id'               => (int) $user['role_id'],
-        'role_name'             => $role['name'] ?? 'admin',
+        'role_name'             => (string) ($role['name'] ?? 'admin'),
         'permissions'           => $permissions,
         'logged_in'             => true,
         'force_password_change' => false,
-    ]);
+    ];
 
-    // Persist immediately so the redirect carries the cookie.
-    $session->close();
+    // CI4 DatabaseHandler stores the result of PHP's session_encode() in the
+    // `data` BLOB column. We construct that string manually:
+    //   key1|serialized_val1;key2|serialized_val2;...
+    // (PHP's built-in default serialization handler format.)
+    $encoded = '';
+    foreach ($session as $key => $value) {
+        if (strpos($key, '|') !== false) {
+            throw new RuntimeException("Session key contains pipe: {$key}");
+        }
+        $encoded .= $key . '|' . serialize($value);
+    }
+
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
+    $ts = time();
+
+    // Insert (or replace) the session row.
+    $st = $pdo->prepare(
+        'INSERT INTO ci_sessions (id, ip_address, timestamp, data) '
+      . 'VALUES (:id, :ip, :ts, :data) '
+      . 'ON DUPLICATE KEY UPDATE ip_address = VALUES(ip_address), '
+      . 'timestamp = VALUES(timestamp), data = VALUES(data)'
+    );
+    $st->bindValue(':id',   $sessionId);
+    $st->bindValue(':ip',   $ip);
+    $st->bindValue(':ts',   $ts, PDO::PARAM_INT);
+    $st->bindParam(':data', $encoded, PDO::PARAM_LOB);
+    $st->execute();
 
     return rtrim($siteUrl, '/') . '/dashboard';
 }
